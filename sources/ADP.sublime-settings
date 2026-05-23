@@ -1,0 +1,23 @@
+// ADP — Another Deploy Plugin — Default Settings
+// НЕ редактируйте этот файл.
+// Используйте: Preferences > Package Settings > ADP > Settings
+{
+	// Список целевых устройств для деплоя.
+	// Поля:
+	//   name        — произвольное название (отображается в списке)
+	//   address     — IP-адрес или hostname устройства
+	//   username    — имя пользователя для SSH/SCP
+	//   remote_path — путь на устройстве, куда копировать файлы
+	"devices": [
+		// {
+		// 	"name": "Taquasar Dev",
+		// 	"address": "172.17.42.213",
+		// 	"username": "taquasar",
+		// 	"remote_path": "/home/taquasar/upd/"
+		// }
+	],
+
+	// Дополнительные опции, передаваемые в scp.
+	// Пример: ["-o", "StrictHostKeyChecking=no", "-P", "2222"]
+	"scp_options": []
+}

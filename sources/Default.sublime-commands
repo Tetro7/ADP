@@ -1,0 +1,10 @@
+[
+	{
+		"caption": "ADP: Deploy",
+		"command": "adp_deploy"
+	},
+	{
+		"caption": "ADP: Edit Settings",
+		"command": "adp_edit_settings"
+	}
+]
