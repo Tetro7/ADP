@@ -3,17 +3,36 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 
 import sublime
 import sublime_plugin
 
 SETTINGS_FILE = "ADP.sublime-settings"
 PANEL_NAME = "ADP"
+BAR_WIDTH = 24
 
 
 def plugin_loaded():
     print("ADP: plugin loaded OK (Python 3.8)")
 
+
+def _make_bar(step, elapsed):
+    """Bouncing progress bar. Width is always fixed so in-place replace works."""
+    period = (BAR_WIDTH - 1) * 2
+    pos = step % period
+    if pos >= BAR_WIDTH:
+        pos = period - pos
+    cells = ["-"] * BAR_WIDTH
+    if pos > 0:
+        cells[pos - 1] = "="
+    cells[pos] = ">"
+    if pos < BAR_WIDTH - 1:
+        cells[pos + 1] = "="
+    return "[{}] {:6.1f}s".format("".join(cells), elapsed)
+
+
+# ── Commands ──────────────────────────────────────────────────────────────────
 
 class AdpDeployCommand(sublime_plugin.WindowCommand):
 
@@ -63,8 +82,18 @@ class AdpDeployCommand(sublime_plugin.WindowCommand):
         username = device.get("username", "")
         remote_path = device.get("remote_path", "")
         extra_opts = sublime.load_settings(SETTINGS_FILE).get("scp_options", [])
-
         cmd = _build_scp_cmd(output_path, username, address, remote_path, extra_opts)
+
+        # Write header synchronously (we're on the main thread here).
+        panel.run_command("append", {"characters": f"ADP: Деплой на {username}@{address}\n"})
+        panel.run_command("append", {"characters": f"Источник : {output_path}\n"})
+        panel.run_command("append", {"characters": f"Команда  : {' '.join(cmd)}\n\n"})
+
+        # Reserve a fixed-width line for the animated progress bar.
+        bar_start = panel.size()
+        initial_bar = _make_bar(0, 0.0)
+        panel.run_command("append", {"characters": initial_bar + "\n"})
+        bar_end = bar_start + len(initial_bar)
 
         def log(text):
             sublime.set_timeout(
@@ -72,54 +101,46 @@ class AdpDeployCommand(sublime_plugin.WindowCommand):
                 0,
             )
 
-        log(f"ADP: Деплой на {username}@{address}\n")
-        log(f"Источник : {output_path}\n")
-        log(f"Команда  : {' '.join(cmd)}\n\n")
-
-        threading.Thread(target=_run_scp, args=(cmd, address, log), daemon=True).start()
-
-
-def _build_scp_cmd(output_path, username, address, remote_path, extra_opts):
-    norm = output_path.replace("\\", "/")
-    destination = f"{username}@{address}:{remote_path}"
-
-    m = re.match(r"^//wsl(?:\.localhost|\$)/([^/]+)/(.+)$", norm, re.IGNORECASE)
-    if m:
-        distro = m.group(1)
-        linux_path = "/" + m.group(2).rstrip("/")
-        opts_str = " ".join(shlex.quote(o) for o in extra_opts)
-        bash_cmd = "scp -r {} {}/* {}".format(opts_str, shlex.quote(linux_path), shlex.quote(destination))
-        return ["wsl", "-d", distro, "bash", "-c", bash_cmd]
-
-    source = norm.rstrip("/") + "/*"
-    return ["scp", "-r"] + extra_opts + [source, destination]
+        threading.Thread(
+            target=_run_scp,
+            args=(cmd, address, panel, log, bar_start, bar_end),
+            daemon=True,
+        ).start()
 
 
-def _run_scp(cmd, address, log):
-    try:
-        kwargs = {}
-        if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **kwargs
+class AdpUpdateBarCommand(sublime_plugin.TextCommand):
+    """Replaces the progress-bar line in place (called from background thread)."""
+
+    def run(self, edit, start, end, text):
+        self.view.replace(edit, sublime.Region(start, end), text)
+        self.view.show(self.view.size())
+
+
+class AdpEditSettingsCommand(sublime_plugin.ApplicationCommand):
+
+    def run(self):
+        sublime.run_command(
+            "edit_settings",
+            {
+                "base_file": "${packages}/ADP/ADP.sublime-settings",
+                "default": (
+                    "// ADP — Another Deploy Plugin — User Settings\n"
+                    "{\n"
+                    "\t\"devices\": [\n"
+                    "\t\t{\n"
+                    "\t\t\t\"name\": \"My Device\",\n"
+                    "\t\t\t\"address\": \"192.168.1.100\",\n"
+                    "\t\t\t\"username\": \"user\",\n"
+                    "\t\t\t\"remote_path\": \"/home/user/deploy/\"\n"
+                    "\t\t}\n"
+                    "\t]\n"
+                    "}\n"
+                ),
+            },
         )
-        for line in proc.stdout:
-            log(line)
-        proc.wait()
 
-        if proc.returncode == 0:
-            log(f"\nADP: Деплой на {address} завершён успешно.\n")
-            sublime.set_timeout(
-                lambda: sublime.status_message(f"ADP: Deploy to {address} OK"), 0
-            )
-        else:
-            log(f"\nADP: Ошибка деплоя на {address} (код выхода {proc.returncode}).\n")
-    except FileNotFoundError:
-        log("\nADP: Команда 'scp' или 'wsl' не найдена в PATH.\n"
-            "Убедитесь, что установлен OpenSSH-клиент и/или WSL.\n")
-    except Exception as ex:
-        log(f"\nADP: Неожиданная ошибка: {ex}\n")
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 class DeviceListInputHandler(sublime_plugin.ListInputHandler):
 
@@ -147,25 +168,66 @@ class DeviceListInputHandler(sublime_plugin.ListInputHandler):
         return items
 
 
-class AdpEditSettingsCommand(sublime_plugin.ApplicationCommand):
+def _build_scp_cmd(output_path, username, address, remote_path, extra_opts):
+    norm = output_path.replace("\\", "/")
+    destination = f"{username}@{address}:{remote_path}"
 
-    def run(self):
-        sublime.run_command(
-            "edit_settings",
-            {
-                "base_file": "${packages}/ADP/ADP.sublime-settings",
-                "default": (
-                    "// ADP — Another Deploy Plugin — User Settings\n"
-                    "{\n"
-                    "\t\"devices\": [\n"
-                    "\t\t{\n"
-                    "\t\t\t\"name\": \"My Device\",\n"
-                    "\t\t\t\"address\": \"192.168.1.100\",\n"
-                    "\t\t\t\"username\": \"user\",\n"
-                    "\t\t\t\"remote_path\": \"/home/user/deploy/\"\n"
-                    "\t\t}\n"
-                    "\t]\n"
-                    "}\n"
+    m = re.match(r"^//wsl(?:\.localhost|\$)/([^/]+)/(.+)$", norm, re.IGNORECASE)
+    if m:
+        distro = m.group(1)
+        linux_path = "/" + m.group(2).rstrip("/")
+        opts_str = " ".join(shlex.quote(o) for o in extra_opts)
+        bash_cmd = "scp -r {} {}/* {}".format(opts_str, shlex.quote(linux_path), shlex.quote(destination))
+        return ["wsl", "-d", distro, "bash", "-c", bash_cmd]
+
+    source = norm.rstrip("/") + "/*"
+    return ["scp", "-r"] + extra_opts + [source, destination]
+
+
+def _run_scp(cmd, address, panel, log, bar_start, bar_end):
+    stop = threading.Event()
+    start = time.time()
+
+    def animate():
+        step = 0
+        while not stop.wait(0.1):
+            step += 1
+            bar = _make_bar(step, time.time() - start)
+            sublime.set_timeout(
+                lambda b=bar: panel.run_command(
+                    "adp_update_bar", {"start": bar_start, "end": bar_end, "text": b}
                 ),
-            },
+                0,
+            )
+
+    threading.Thread(target=animate, daemon=True).start()
+
+    try:
+        kwargs = {}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **kwargs
         )
+        for line in proc.stdout:
+            log(line)
+        proc.wait()
+
+        elapsed = time.time() - start
+        stop.set()
+
+        if proc.returncode == 0:
+            result = f"\nADP: Успешно  ({elapsed:.1f}s)\n"
+            log(result)
+            sublime.set_timeout(
+                lambda: sublime.status_message(f"ADP: Deploy to {address} OK  ({elapsed:.1f}s)"), 0
+            )
+        else:
+            result = f"\nADP: Ошибка (код {proc.returncode})  ({elapsed:.1f}s)\n"
+            log(result)
+    except FileNotFoundError:
+        stop.set()
+        log("\nADP: Команда 'scp' или 'wsl' не найдена в PATH.\n")
+    except Exception as ex:
+        stop.set()
+        log(f"\nADP: Неожиданная ошибка: {ex}\n")
