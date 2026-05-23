@@ -163,7 +163,7 @@ class DeviceListInputHandler(sublime_plugin.ListInputHandler):
                 text=label,
                 value=i,
                 annotation=annotation,
-                kind=(sublime.KIND_ID_AMBIGUOUS, "D", "Device"),
+                kind=(sublime.KIND_ID_AMBIGUOUS, "📤", "Device"),
             ))
         return items
 
